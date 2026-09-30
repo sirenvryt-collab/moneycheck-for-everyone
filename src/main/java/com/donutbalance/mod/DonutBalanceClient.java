@@ -6,11 +6,13 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.text.Normalizer;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -22,13 +24,21 @@ public class DonutBalanceClient implements ClientModInitializer {
 	public static final String MOD_ID = "donutbalance";
 	public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
-	// "Steve paid you $1,500" / "Steve paid you $2.5K"
+	// "Steve paid you $1,500" / "Steve paid you $2.5K" (prefixes like "» " or "[$] " are allowed)
 	private static final Pattern RECEIVED = Pattern.compile(
-			"^(\\w{1,16}) paid you \\$([\\d,]+(?:\\.\\d+)?)([KMBTQkmbtq]?)");
+			"^\\W*(?:\\[[^\\]]*\\]\\W*)?([\\w.]{1,17})\\s+paid\\s+you\\s+\\$\\s*([\\d,]+(?:\\.\\d+)?)([KMBTQ]?)",
+			Pattern.CASE_INSENSITIVE);
 	// "You paid Steve $1,500"
 	private static final Pattern SENT = Pattern.compile(
-			"^You paid (\\w{1,16}) \\$([\\d,]+(?:\\.\\d+)?)([KMBTQkmbtq]?)",
+			"^\\W*(?:\\[[^\\]]*\\]\\W*)?you\\s+paid\\s+([\\w.]{1,17})\\s+\\$\\s*([\\d,]+(?:\\.\\d+)?)([KMBTQ]?)",
 			Pattern.CASE_INSENSITIVE);
+
+	// small-caps letters a-z (servers often use this font), as unicode escapes
+	private static final String SMALL_CAPS =
+			"\u1D00\u0299\u1D04\u1D05\u1D07\uA730\u0262\u029C\u026A\u1D0A\u1D0B\u029F\u1D0D"
+					+ "\u0274\u1D0F\u1D18\u01EB\u0280\uA731\u1D1B\u1D1C\u1D20\u1D21x\u028F\u1D22";
+
+	private boolean debug = false;
 
 	private final BalanceTracker tracker = new BalanceTracker();
 
@@ -36,6 +46,12 @@ public class DonutBalanceClient implements ClientModInitializer {
 	public void onInitializeClient() {
 		ClientCommandRegistrationCallback.EVENT.register(this::registerCommands);
 		ClientReceiveMessageEvents.GAME.register(this::onGameMessage);
+		// Server-sent chat with no player sender (player chat is ignored so it can't be spoofed)
+		ClientReceiveMessageEvents.CHAT.register((message, signed, sender, params, timestamp) -> {
+			if (sender == null) {
+				handle(message.getString());
+			}
+		});
 		LOGGER.info("Donut Balance Tracker loaded. Tracking payment messages. Use /moneycheck.");
 	}
 
@@ -43,13 +59,27 @@ public class DonutBalanceClient implements ClientModInitializer {
 		if (overlay) {
 			return;
 		}
-		String content = message.getString().trim();
+		handle(message.getString());
+	}
+
+	private void handle(String raw) {
+		String content = normalize(raw).trim();
+
+		if (content.toLowerCase(Locale.ROOT).contains("paid")) {
+			LOGGER.info("[donutbalance] saw message: {}", raw);
+			if (debug) {
+				say("[debug] raw: " + raw, Formatting.GRAY);
+			}
+		}
 
 		Matcher m = RECEIVED.matcher(content);
 		if (m.find()) {
 			Double amount = parseAmount(m.group(2) + m.group(3));
 			if (amount != null) {
 				tracker.onPayment(amount);
+				if (debug) {
+					say("[debug] matched RECEIVED +" + formatExact(amount), Formatting.GREEN);
+				}
 			}
 			return;
 		}
@@ -59,7 +89,26 @@ public class DonutBalanceClient implements ClientModInitializer {
 			Double amount = parseAmount(m.group(2) + m.group(3));
 			if (amount != null) {
 				tracker.onPayment(-amount);
+				if (debug) {
+					say("[debug] matched SENT -" + formatExact(amount), Formatting.RED);
+				}
 			}
+		}
+	}
+
+	private static String normalize(String s) {
+		StringBuilder sb = new StringBuilder(s.length());
+		for (char c : s.toCharArray()) {
+			int idx = SMALL_CAPS.indexOf(c);
+			sb.append(idx >= 0 ? (char) ('a' + idx) : c);
+		}
+		return Normalizer.normalize(sb.toString(), Normalizer.Form.NFKC);
+	}
+
+	private static void say(String text, Formatting color) {
+		MinecraftClient mc = MinecraftClient.getInstance();
+		if (mc.player != null) {
+			mc.player.sendMessage(Text.literal(text).formatted(color), false);
 		}
 	}
 
@@ -85,6 +134,14 @@ public class DonutBalanceClient implements ClientModInitializer {
 											"Balance set to $" + formatExact(value)).formatted(Formatting.GREEN));
 									return 1;
 								})))
+				.then(literal("debug")
+						.executes(context -> {
+							debug = !debug;
+							context.getSource().sendFeedback(Text.literal(
+									"Debug " + (debug ? "ON: any message containing 'paid' will be echoed" : "OFF"))
+									.formatted(Formatting.YELLOW));
+							return 1;
+						}))
 				.then(literal("reset")
 						.executes(context -> {
 							tracker.resetToday();
