@@ -32,6 +32,14 @@ public class DonutBalanceClient implements ClientModInitializer {
 	private static final Pattern SENT = Pattern.compile(
 			"^\\W*(?:\\[[^\\]]*\\]\\W*)?you\\s+paid\\s+([\\w.]{1,17})\\s+\\$\\s*([\\d,]+(?:\\.\\d+)?)([KMBTQ]?)",
 			Pattern.CASE_INSENSITIVE);
+	// "You bought 1 Diamond for $1,500"
+	private static final Pattern BOUGHT = Pattern.compile(
+			"^\\W*(?:\\[[^\\]]*\\]\\W*)?you\\s+bought\\s+.+?\\s+for\\s+\\$\\s*([\\d,]+(?:\\.\\d+)?)([KMBTQ]?)",
+			Pattern.CASE_INSENSITIVE);
+	// /sell shows only the amount, e.g. "$1,500" or "+$1,500" (whole message must be just that)
+	private static final Pattern SOLD = Pattern.compile(
+			"^\\+?\\s*\\$\\s*([\\d,]+(?:\\.\\d+)?)([KMBTQ]?)\\.?$",
+			Pattern.CASE_INSENSITIVE);
 
 	// small-caps letters a-z (servers often use this font), as unicode escapes
 	private static final String SMALL_CAPS =
@@ -52,7 +60,7 @@ public class DonutBalanceClient implements ClientModInitializer {
 				handle(message.getString());
 			}
 		});
-		LOGGER.info("Donut Balance Tracker loaded. Tracking payment messages. Use /moneycheck.");
+		LOGGER.info("Donut Balance Tracker loaded. Tracking payments, purchases and sales. Use /moneycheck.");
 	}
 
 	private void onGameMessage(Text message, boolean overlay) {
@@ -62,38 +70,48 @@ public class DonutBalanceClient implements ClientModInitializer {
 		handle(message.getString());
 	}
 
+	/** Safety wrapper: an error here must never crash the game. */
 	private void handle(String raw) {
-		String content = normalize(raw).trim();
+		try {
+			handleInner(raw);
+		} catch (Throwable t) {
+			LOGGER.error("[donutbalance] error handling message", t);
+		}
+	}
 
-		if (content.toLowerCase(Locale.ROOT).contains("paid")) {
+	private void handleInner(String raw) {
+		String content = normalize(raw).trim();
+		String lower = content.toLowerCase(Locale.ROOT);
+
+		if (lower.contains("paid") || lower.contains("bought") || lower.startsWith("$") || lower.startsWith("+$")) {
 			LOGGER.info("[donutbalance] saw message: {}", raw);
 			if (debug) {
 				say("[debug] raw: " + raw, Formatting.GRAY);
 			}
 		}
 
-		Matcher m = RECEIVED.matcher(content);
-		if (m.find()) {
-			Double amount = parseAmount(m.group(2) + m.group(3));
-			if (amount != null) {
-				tracker.onPayment(amount);
-				if (debug) {
-					say("[debug] matched RECEIVED +" + formatExact(amount), Formatting.GREEN);
-				}
-			}
-			return;
-		}
+		if (tryApply(RECEIVED, content, 2, 3, +1, "RECEIVED")) return;
+		if (tryApply(SENT, content, 2, 3, -1, "SENT")) return;
+		if (tryApply(BOUGHT, content, 1, 2, -1, "BOUGHT")) return;
+		tryApply(SOLD, content, 1, 2, +1, "SOLD");
+	}
 
-		m = SENT.matcher(content);
-		if (m.find()) {
-			Double amount = parseAmount(m.group(2) + m.group(3));
-			if (amount != null) {
-				tracker.onPayment(-amount);
-				if (debug) {
-					say("[debug] matched SENT -" + formatExact(amount), Formatting.RED);
-				}
-			}
+	private boolean tryApply(Pattern pattern, String content, int amountGroup, int suffixGroup,
+							 int sign, String label) {
+		Matcher m = pattern.matcher(content);
+		if (!m.find()) {
+			return false;
 		}
+		Double amount = parseAmount(m.group(amountGroup) + m.group(suffixGroup));
+		if (amount == null) {
+			return false;
+		}
+		tracker.onPayment(sign * amount);
+		if (debug) {
+			say("[debug] matched " + label + " " + (sign > 0 ? "+" : "-") + formatExact(amount),
+					sign > 0 ? Formatting.GREEN : Formatting.RED);
+		}
+		return true;
 	}
 
 	private static String normalize(String s) {
@@ -138,7 +156,7 @@ public class DonutBalanceClient implements ClientModInitializer {
 						.executes(context -> {
 							debug = !debug;
 							context.getSource().sendFeedback(Text.literal(
-									"Debug " + (debug ? "ON: any message containing 'paid' will be echoed" : "OFF"))
+									"Debug " + (debug ? "ON: payment/buy/sell messages will be echoed" : "OFF"))
 									.formatted(Formatting.YELLOW));
 							return 1;
 						}))
