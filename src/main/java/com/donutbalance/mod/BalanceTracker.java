@@ -64,6 +64,15 @@ public class BalanceTracker {
 		return state.todayDelta;
 	}
 
+	public synchronized boolean isHudEnabled() {
+		return state.hudEnabled;
+	}
+
+	public synchronized void setHudEnabled(boolean enabled) {
+		state.hudEnabled = enabled;
+		saveState();
+	}
+
 	private void rollDayIfNeeded() {
 		String today = LocalDate.now().toString();
 		if (state.date == null || !state.date.equals(today)) {
@@ -102,5 +111,6 @@ public class BalanceTracker {
 		double todayDelta;
 		boolean hasBalance;
 		double balance;
+		boolean hudEnabled;
 	}
 }
