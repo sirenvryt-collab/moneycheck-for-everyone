@@ -6,7 +6,10 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.render.RenderTickCounter;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import org.slf4j.Logger;
@@ -60,7 +63,34 @@ public class DonutBalanceClient implements ClientModInitializer {
 				handle(message.getString());
 			}
 		});
+		HudRenderCallback.EVENT.register(this::onHudRender);
 		LOGGER.info("Donut Balance Tracker loaded. Tracking payments, purchases and sales. Use /moneycheck.");
+	}
+
+	private void onHudRender(DrawContext context, RenderTickCounter tickCounter) {
+		try {
+			if (!tracker.isHudEnabled()) {
+				return;
+			}
+			MinecraftClient client = MinecraftClient.getInstance();
+			if (client.player == null || client.options.hudHidden) {
+				return;
+			}
+
+			double delta = tracker.getDelta();
+			String sign = delta > 0 ? "+" : delta < 0 ? "-" : "";
+			String text = "Live: " + sign + formatAbbrev(Math.abs(delta));
+			int color = delta > 0 ? 0xFF55FF55 : delta < 0 ? 0xFFFF5555 : 0xFFAAAAAA;
+
+			int textWidth = client.textRenderer.getWidth(text);
+			int x = (context.getScaledWindowWidth() - textWidth) / 2;
+			int y = 6;
+
+			context.fill(x - 4, y - 3, x + textWidth + 4, y + 11, 0xA0000000);
+			context.drawText(client.textRenderer, text, x, y, color, true);
+		} catch (Throwable t) {
+			LOGGER.error("[donutbalance] HUD render error", t);
+		}
 	}
 
 	private void onGameMessage(Text message, boolean overlay) {
@@ -130,6 +160,12 @@ public class DonutBalanceClient implements ClientModInitializer {
 		}
 	}
 
+	private void setHud(FabricClientCommandSource source, boolean enabled) {
+		tracker.setHudEnabled(enabled);
+		source.sendFeedback(Text.literal("Live HUD " + (enabled ? "enabled." : "disabled."))
+				.formatted(enabled ? Formatting.GREEN : Formatting.YELLOW));
+	}
+
 	private void registerCommands(CommandDispatcher<FabricClientCommandSource> dispatcher,
 								  net.minecraft.command.CommandRegistryAccess registryAccess) {
 		dispatcher.register(literal("moneycheck")
@@ -137,6 +173,19 @@ public class DonutBalanceClient implements ClientModInitializer {
 					report(context.getSource());
 					return 1;
 				})
+				.then(literal("hud")
+						.executes(context -> {
+							setHud(context.getSource(), !tracker.isHudEnabled());
+							return 1;
+						})
+						.then(literal("on").executes(context -> {
+							setHud(context.getSource(), true);
+							return 1;
+						}))
+						.then(literal("off").executes(context -> {
+							setHud(context.getSource(), false);
+							return 1;
+						})))
 				.then(literal("set")
 						.then(argument("amount", StringArgumentType.word())
 								.executes(context -> {
